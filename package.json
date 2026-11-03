@@ -1,6 +1,6 @@
 {
   "name": "dsh-media",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "DSH tools that speak text, create or edit an image, and make a video from text or a still.",
