@@ -3,7 +3,7 @@
  * from text or from a still. Files are saved locally and served at /media.
  */
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, createReadStream } from 'node:fs'
+import { mkdirSync, createReadStream, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -110,6 +110,98 @@ function render(_args, value) {
   return [{ type: 'text', text: value.note }]
 }
 
+function contentType(file) {
+  if (file.endsWith('.mp3')) return 'audio/mpeg'
+  if (file.endsWith('.mp4')) return 'video/mp4'
+  if (file.endsWith('.png')) return 'image/png'
+  if (file.endsWith('.webp')) return 'image/webp'
+  return 'image/jpeg'
+}
+
+function byteRange(header, size) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(header).split(',')[0].trim())
+  if (!match) return null
+  const startText = match[1]
+  const endText = match[2]
+  if (startText === '' && endText === '') return null
+  let start
+  let end
+  if (startText === '') {
+    const suffix = Number(endText)
+    if (!Number.isInteger(suffix) || suffix <= 0) return null
+    start = Math.max(0, size - suffix)
+    end = size - 1
+  } else {
+    start = Number(startText)
+    end = endText === '' ? size - 1 : Number(endText)
+  }
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end >= size || start > end) return null
+  return { start, end }
+}
+
+function serveFile(req, res, filePath, type, file) {
+  let size
+  try {
+    size = statSync(filePath).size
+  } catch {
+    res.writeHead(404)
+    res.end()
+    return
+  }
+  const url = new URL(req.url ?? '/', 'http://localhost')
+  const download = url.searchParams.get('download') === '1' && !req.headers.range
+  const headers = {
+    'content-type': type,
+    'accept-ranges': 'bytes',
+    'cache-control': 'public, max-age=3600',
+  }
+  if (download) headers['content-disposition'] = `attachment; filename="${file}"`
+  const range = download ? undefined : req.headers.range
+  if (range) {
+    const span = byteRange(range, size)
+    if (!span) {
+      res.writeHead(416, { 'content-range': `bytes */${size}` })
+      res.end()
+      return
+    }
+    res.writeHead(206, {
+      ...headers,
+      'content-range': `bytes ${span.start}-${span.end}/${size}`,
+      'content-length': span.end - span.start + 1,
+    })
+    if (req.method === 'HEAD') {
+      res.end()
+      return
+    }
+    createReadStream(filePath, { start: span.start, end: span.end }).pipe(res)
+    return
+  }
+  res.writeHead(req.method === 'HEAD' ? 200 : 200, { ...headers, 'content-length': size })
+  if (req.method === 'HEAD') {
+    res.end()
+    return
+  }
+  createReadStream(filePath).pipe(res)
+}
+
+function watchPage(file) {
+  const src = `/media/${file}?play=1`
+  const save = `/media/${file}?download=1`
+  return `<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video</title>
+<style>
+  html,body{margin:0;height:100%;background:#111}
+  body{display:grid;place-items:center}
+  .stage{position:relative;width:min(100%,480px)}
+  video{width:100%;max-height:100vh;background:#000;display:block}
+  a{position:absolute;top:10px;right:10px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:999px;background:#fff;text-decoration:none;box-shadow:0 1px 3px rgba(0,0,0,.28)}
+</style>
+<div class="stage"><video controls autoplay playsinline src="${src}"></video><a href="${save}" download="${file}" aria-label="Tải về"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M8 1.8v7.6M5 7.2 8 10.2l3-3" fill="none" stroke="#1c1c1e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 13.2h10" fill="none" stroke="#1c1c1e" stroke-width="1.6" stroke-linecap="round"/></svg></a></div>
+`
+}
+
 export function apply(ctx, config) {
   const store = {
     dir: config.mediaDir,
@@ -117,7 +209,35 @@ export function apply(ctx, config) {
   }
   mkdirSync(store.dir, { recursive: true })
 
-  ctx.webServer.register({
+  const registerRoute = (route) => {
+    try {
+      ctx.webServer.register(route)
+    } catch (error) {
+      if (!String(error?.message ?? error).includes('duplicate')) throw error
+    }
+  }
+
+  registerRoute({
+    kind: 'prefix',
+    path: '/media/watch',
+    handler(req, res) {
+      const file = basename(new URL(req.url ?? '/', 'http://localhost').pathname)
+      if (!FILE_NAME.test(file)) {
+        res.writeHead(404)
+        res.end()
+        return
+      }
+      const html = watchPage(file)
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-cache',
+        'content-length': Buffer.byteLength(html),
+      })
+      res.end(req.method === 'HEAD' ? undefined : html)
+    },
+  })
+
+  registerRoute({
     kind: 'prefix',
     path: '/media',
     handler(req, res) {
@@ -127,15 +247,7 @@ export function apply(ctx, config) {
         res.end()
         return
       }
-      res.writeHead(200, {
-        'content-type': file.endsWith('.mp3') ? 'audio/mpeg'
-          : file.endsWith('.mp4') ? 'video/mp4'
-          : file.endsWith('.png') ? 'image/png'
-          : file.endsWith('.webp') ? 'image/webp'
-          : 'image/jpeg',
-        'cache-control': 'public, max-age=31536000, immutable',
-      })
-      createReadStream(join(store.dir, file)).pipe(res)
+      serveFile(req, res, join(store.dir, file), contentType(file), file)
     },
   })
 
@@ -302,7 +414,8 @@ export function apply(ctx, config) {
       }
       if (!remote) throw new Error('The video was not ready in time')
       const url = await download(store, remote, 'mp4', exec.signal)
-      return result('video', url, `Video (${duration}s): ${url}`)
+      const watch = url.replace(/\/media\//, '/media/watch/')
+      return result('video', url, `Video (${duration}s): ${watch}`)
     },
   }))
 }

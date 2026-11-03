@@ -71,11 +71,15 @@ Thêm `dsh-media` vào `dsh.profile.bundles`, rồi phủ cấu hình trong `cor
 
 `publicOrigin` là địa chỉ trang public. `mediaDir` là thư mục lưu file. Trang phục vụ file tại `/media/<tệp>`.
 
-Trên máy này:
+Trên máy đang chạy:
 
 ```yaml
 - id: dsh-media
   config:
-    publicOrigin: https://shadow-timber-willow-fire.grok.me
-    mediaDir: /root/.dsh/state/superagent/media
+    publicOrigin: https://agent.hoantienmuasam.net
+    mediaDir: /dsh/home/state/superagent/media
 ```
+
+## Trên trang chat
+
+`client.js` đổi link `/media/...mp3` thành thanh nghe, link video thành khung xem, và thêm icon tải ở hàng nút dưới tin nhắn. File video và audio vẫn tải được bằng `?download=1`.
