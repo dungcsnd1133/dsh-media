@@ -27,9 +27,9 @@ Thông số dưới đây là phần thân JSON gửi lên API, không phải th
 | — | `model` | `grok-imagine-image-2.0` |
 | `prompt` | `prompt` | Bắt buộc. |
 | `n` | `n` | Số ảnh, từ 1 đến 10. Mặc định 1. |
+| `aspect_ratio` | `aspect_ratio` | Không bắt buộc. `1:1`, `3:4`, `4:3`, `9:16`, `16:9`, `2:3`, `3:2`, `9:19.5`, `19.5:9`, `9:20`, `20:9`, `1:2`, `2:1`, `21:9`, `5:2`, `auto`. Bỏ trống thì API tự chọn. |
+| `resolution` | `resolution` | Không bắt buộc. `1k`, `1.5k`, `2k`. Bỏ trống thì API dùng `1k`. |
 | — | `response_format` | `url` |
-
-API này không nhận `aspect_ratio`, `resolution` hay `quality`.
 
 ### `edit_image`
 
@@ -40,6 +40,8 @@ API này không nhận `aspect_ratio`, `resolution` hay `quality`.
 | — | `model` | `grok-imagine-image-2.0` |
 | `prompt` | `prompt` | Bắt buộc. Cách sửa ảnh. |
 | `image_url` | `image.url` | URL `https` của ảnh. `image.type` luôn là `image_url`. |
+| `resolution` | `resolution` | Không bắt buộc. `1k`, `1.5k`, `2k`. Bỏ trống thì API dùng `1k`. |
+| `aspect_ratio` | `aspect_ratio` | Không bắt buộc. Cùng danh sách với `create_image`, gồm `9:16`. Bỏ trống thì giữ tỉ lệ ảnh gốc. |
 
 ### `create_video`
 
@@ -51,8 +53,10 @@ API này không nhận `aspect_ratio`, `resolution` hay `quality`.
 | `prompt` | `prompt` | Bắt buộc. |
 | `image_url` | `image.url` | Không bắt buộc. Bỏ trống thì tạo video từ chữ. Có URL thì tạo video từ ảnh đó. |
 | `duration` | `duration` | Số nguyên từ 1 đến 15 giây. Mặc định 6. |
+| `aspect_ratio` | `aspect_ratio` | Chỉ khi tạo từ chữ. `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `21:9`, `5:2`. Video từ ảnh giữ tỉ lệ ảnh gốc. |
+| `resolution` | `resolution` | Không bắt buộc. `480p`, `720p`, `1080p`. Bỏ trống thì API dùng `480p`. |
 
-API này không nhận `resolution`. Khi xong, URL nằm ở `video.url`.
+Khi xong, URL nằm ở `video.url`.
 
 ## Cài vào DSH
 

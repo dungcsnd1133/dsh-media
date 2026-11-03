@@ -28,6 +28,13 @@ const LANGUAGES = [
 ]
 const IMAGE_MODEL = 'grok-imagine-image-2.0'
 const VIDEO_MODEL = 'grok-imagine-video-1.5'
+const IMAGE_ASPECT_RATIOS = [
+  '1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2',
+  '9:19.5', '19.5:9', '9:20', '20:9', '1:2', '2:1', '21:9', '5:2', 'auto',
+]
+const IMAGE_RESOLUTIONS = ['1k', '1.5k', '2k']
+const VIDEO_ASPECT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9', '5:2']
+const VIDEO_RESOLUTIONS = ['480p', '720p', '1080p']
 const FILE_NAME = /^[a-f0-9]{16}\.(mp3|jpg|jpeg|png|webp|mp4)$/
 
 function apiKey() {
@@ -166,11 +173,13 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'create_image',
-    description: 'Create images with POST /v1/images/generations. model is grok-imagine-image-2.0. n is 1 to 10 and defaults to 1. The REST body does not take aspect ratio, resolution, or quality. Show every returned URL as a markdown image.',
-    timeoutMs: 120000,
+    description: 'Create images with POST /v1/images/generations. model is grok-imagine-image-2.0. n is 1 to 10 and defaults to 1. aspect_ratio defaults to auto. resolution is 1k, 1.5k, or 2k and defaults to 1k. Show every returned URL as a markdown image.',
+    timeoutMs: 180000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'What the image should show.' },
       n: { type: 'number', description: 'How many images to create, from 1 to 10. Defaults to 1.' },
+      aspect_ratio: { type: 'string', description: '1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, or auto. Defaults to auto.' },
+      resolution: { type: 'string', description: '1k, 1.5k, or 2k. Defaults to 1k.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
@@ -178,10 +187,19 @@ export function apply(ctx, config) {
       if (!prompt) throw new Error('prompt is empty')
       const n = args.n === undefined ? 1 : args.n
       if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error('n must be an integer from 1 to 10')
+      const aspectRatio = pick(args.aspect_ratio, IMAGE_ASPECT_RATIOS, undefined)
+      const resolution = pick(args.resolution, IMAGE_RESOLUTIONS, undefined)
       const response = await xai('/v1/images/generations', {
         method: 'POST',
         signal: exec.signal,
-        body: { model: IMAGE_MODEL, prompt, n, response_format: 'url' },
+        body: {
+          model: IMAGE_MODEL,
+          prompt,
+          n,
+          response_format: 'url',
+          ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
+          ...(resolution === undefined ? {} : { resolution }),
+        },
       })
       const remote = imageUrls(await response.json())
       if (remote.length === 0) throw new Error('The image API returned no URL')
@@ -193,11 +211,13 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'edit_image',
-    description: 'Edit one image with POST /v1/images/edits. model is grok-imagine-image-2.0. The image field is { url, type: "image_url" }. Show the returned URL as a markdown image.',
-    timeoutMs: 90000,
+    description: 'Edit one image with POST /v1/images/edits. model is grok-imagine-image-2.0. The image field is { url, type: "image_url" }. aspect_ratio includes 9:16. resolution is 1k, 1.5k, or 2k. Show the returned URL as a markdown image.',
+    timeoutMs: 180000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'How to change the image.' },
       image_url: { type: 'string', required: true, description: 'Public URL of the image to edit.' },
+      aspect_ratio: { type: 'string', description: 'Same ratios as create_image, including 9:16. Omit to keep the source ratio.' },
+      resolution: { type: 'string', description: '1k, 1.5k, or 2k. Defaults to 1k.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
@@ -205,6 +225,8 @@ export function apply(ctx, config) {
       const imageUrlInput = args.image_url.trim()
       if (!prompt) throw new Error('prompt is empty')
       if (!/^https:\/\//.test(imageUrlInput)) throw new Error('image_url must be an https URL')
+      const resolution = pick(args.resolution, IMAGE_RESOLUTIONS, undefined)
+      const aspectRatio = pick(args.aspect_ratio, IMAGE_ASPECT_RATIOS, undefined)
       const response = await xai('/v1/images/edits', {
         method: 'POST',
         signal: exec.signal,
@@ -212,6 +234,8 @@ export function apply(ctx, config) {
           model: IMAGE_MODEL,
           prompt,
           image: { url: imageUrlInput, type: 'image_url' },
+          ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
+          ...(resolution === undefined ? {} : { resolution }),
         },
       })
       const remote = imageUrls(await response.json())
@@ -223,12 +247,14 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'create_video',
-    description: 'Create a video with POST /v1/videos/generations, then poll GET /v1/videos/{request_id} until status is done. model is grok-imagine-video-1.5. duration is an integer from 1 to 15 seconds and defaults to 6. Omit image_url for text-to-video. The REST body does not take resolution. Show the returned URL to the user.',
+    description: 'Create a video with POST /v1/videos/generations, then poll GET /v1/videos/{request_id} until status is done. model is grok-imagine-video-1.5. duration is an integer from 1 to 15 seconds and defaults to 6. resolution is 480p, 720p, or 1080p. aspect_ratio includes 9:16 and is sent only for text-to-video. Omit image_url for text-to-video. Show the returned URL to the user.',
     timeoutMs: 240000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'What the video should show and how the camera moves.' },
-      image_url: { type: 'string', description: 'Optional public https URL of a still image to animate.' },
+      image_url: { type: 'string', description: 'Optional public https URL of a still image to animate. Image-to-video keeps that image ratio.' },
       duration: { type: 'number', description: 'Length in seconds, an integer from 1 to 15. Defaults to 6.' },
+      aspect_ratio: { type: 'string', description: 'Text-to-video only: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 21:9, or 5:2.' },
+      resolution: { type: 'string', description: '480p, 720p, or 1080p. Defaults to 480p when omitted.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
@@ -238,6 +264,8 @@ export function apply(ctx, config) {
       if (!Number.isInteger(duration) || duration < 1 || duration > 15) throw new Error('duration must be an integer from 1 to 15')
       const image = typeof args.image_url === 'string' && args.image_url.trim() ? args.image_url.trim() : undefined
       if (image !== undefined && !/^https:\/\//.test(image)) throw new Error('image_url must be an https URL')
+      const aspectRatio = image === undefined ? pick(args.aspect_ratio, VIDEO_ASPECT_RATIOS, undefined) : undefined
+      const resolution = pick(args.resolution, VIDEO_RESOLUTIONS, undefined)
       const started = await xai('/v1/videos/generations', {
         method: 'POST',
         signal: exec.signal,
@@ -246,6 +274,8 @@ export function apply(ctx, config) {
           prompt,
           duration,
           ...(image === undefined ? {} : { image: { url: image } }),
+          ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
+          ...(resolution === undefined ? {} : { resolution }),
         },
       })
       const requestId = (await started.json()).request_id
