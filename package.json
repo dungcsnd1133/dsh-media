@@ -1,0 +1,26 @@
+{
+  "name": "dsh-media",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH tools that speak text, create or edit an image, and make a video from text or a still.",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.5",
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

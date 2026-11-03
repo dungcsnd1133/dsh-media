@@ -1,0 +1,5 @@
+# Registers the voice, image, and video tools on the host tool registry.
+# The profile overlay supplies publicOrigin and mediaDir.
+- insert:
+    - id: dsh-media
+      name: dsh-media
