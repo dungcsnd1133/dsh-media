@@ -16,7 +16,16 @@ export const Config = z.object({
   mediaDir: z.string().required(),
 })
 
-const VOICES = ['eve', 'ara', 'rex', 'sal', 'leo']
+const VOICES = [
+  'eve', 'ara', 'rex', 'sal', 'leo',
+  'carina', 'zagan', 'helix', 'orion', 'luna', 'iris', 'altair', 'zenith',
+  'perseus', 'helios', 'lux', 'kepler', 'rigel', 'cosmo', 'celeste', 'ursa',
+  'sirius', 'lumen', 'castor', 'naksh', 'atlas', 'aurora', 'liora',
+]
+const LANGUAGES = [
+  'auto', 'en', 'vi', 'ar-EG', 'ar-SA', 'ar-AE', 'bn', 'zh', 'fr', 'de',
+  'hi', 'id', 'it', 'ja', 'ko', 'pt-BR', 'pt-PT', 'ru', 'es-MX', 'es-ES', 'tr',
+]
 const IMAGE_MODEL = 'grok-imagine-image-2.0'
 const VIDEO_MODEL = 'grok-imagine-video-1.5'
 const FILE_NAME = /^[a-f0-9]{16}\.(mp3|jpg|jpeg|png|webp|mp4)$/
@@ -62,8 +71,18 @@ async function download(store, url, fallbackExtension, signal) {
   return save(store, Buffer.from(await response.arrayBuffer()), extension)
 }
 
-function imageUrl(payload) {
-  return payload?.data?.[0]?.url ?? payload?.url ?? payload?.image?.url
+function pick(value, allowed, fallback) {
+  if (value === undefined || value === '') return fallback
+  const found = allowed.find((item) => item.toLowerCase() === String(value).toLowerCase())
+  if (!found) throw new Error(`must be one of: ${allowed.join(', ')}`)
+  return found
+}
+
+function imageUrls(payload) {
+  const rows = Array.isArray(payload?.data) ? payload.data : []
+  const urls = rows.map((row) => row?.url).filter((url) => typeof url === 'string' && url)
+  if (urls.length === 0 && typeof payload?.url === 'string') urls.push(payload.url)
+  return urls
 }
 
 function result(kind, url, detail) {
@@ -115,20 +134,26 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'speak',
-    description: 'Turn text into a spoken audio file. Voices: eve (female, upbeat), ara (female, warm), rex (male, clear), sal (neutral), leo (male, strong). Use language "vi" for Vietnamese and "en" for English.',
-    timeoutMs: 60000,
+    description: 'Turn text into speech with POST /v1/tts. voice_id defaults to eve. language is a BCP-47 code and defaults to en; use vi for Vietnamese. text may be at most 60000 characters. Returns an mp3 URL.',
+    timeoutMs: 120000,
     parameters: {
-      text: { type: 'string', required: true, description: 'The words to speak. Keep it under 2000 characters.' },
-      voice: { type: 'string', description: 'eve, ara, rex, sal, or leo. Defaults to eve.' },
-      language: { type: 'string', description: 'Language code such as en or vi. Defaults to en.' },
+      text: { type: 'string', required: true, description: 'Words to speak. At most 60000 characters.' },
+      voice: { type: 'string', description: 'voice_id. Built-in: eve (default), ara, rex, sal, leo, and the other Grok voices. Custom voice ids are also accepted.' },
+      language: { type: 'string', description: 'BCP-47 code: auto, en, vi, zh, ja, ko, fr, de, hi, id, it, ru, tr, bn, pt-BR, pt-PT, es-MX, es-ES, ar-EG, ar-SA, ar-AE. Defaults to en.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
       const text = args.text.trim()
       if (!text) throw new Error('text is empty')
-      if (text.length > 2000) throw new Error('text must be at most 2000 characters')
-      const voice = VOICES.includes(args.voice) ? args.voice : 'eve'
-      const language = typeof args.language === 'string' && /^[a-z]{2}$/.test(args.language) ? args.language : 'en'
+      if (text.length > 60000) throw new Error('text must be at most 60000 characters')
+      const voice = args.voice === undefined || args.voice === ''
+        ? 'eve'
+        : VOICES.includes(String(args.voice).toLowerCase())
+          ? String(args.voice).toLowerCase()
+          : /^[a-z0-9]{8}$/.test(String(args.voice))
+            ? String(args.voice)
+            : (() => { throw new Error(`voice must be a built-in voice or an 8-character custom voice_id`) })()
+      const language = pick(args.language, LANGUAGES, 'en')
       const response = await xai('/v1/tts', {
         method: 'POST',
         signal: exec.signal,
@@ -141,30 +166,34 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'create_image',
-    description: 'Create a new image from a text description. Show the returned URL to the user as a markdown image.',
-    timeoutMs: 90000,
+    description: 'Create images with POST /v1/images/generations. model is grok-imagine-image-2.0. n is 1 to 10 and defaults to 1. The REST body does not take aspect ratio, resolution, or quality. Show every returned URL as a markdown image.',
+    timeoutMs: 120000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'What the image should show.' },
+      n: { type: 'number', description: 'How many images to create, from 1 to 10. Defaults to 1.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
       const prompt = args.prompt.trim()
       if (!prompt) throw new Error('prompt is empty')
+      const n = args.n === undefined ? 1 : args.n
+      if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error('n must be an integer from 1 to 10')
       const response = await xai('/v1/images/generations', {
         method: 'POST',
         signal: exec.signal,
-        body: { model: IMAGE_MODEL, prompt, n: 1 },
+        body: { model: IMAGE_MODEL, prompt, n, response_format: 'url' },
       })
-      const remote = imageUrl(await response.json())
-      if (!remote) throw new Error('The image API returned no URL')
-      const url = await download(store, remote, 'jpg', exec.signal)
-      return result('image', url, `Image: ![image](${url})`)
+      const remote = imageUrls(await response.json())
+      if (remote.length === 0) throw new Error('The image API returned no URL')
+      const urls = []
+      for (const item of remote) urls.push(await download(store, item, 'jpg', exec.signal))
+      return result('image', urls[0], urls.map((url) => `![image](${url})`).join('\n'))
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'edit_image',
-    description: 'Edit an existing image from a public URL using a text instruction. Show the returned URL as a markdown image.',
+    description: 'Edit one image with POST /v1/images/edits. model is grok-imagine-image-2.0. The image field is { url, type: "image_url" }. Show the returned URL as a markdown image.',
     timeoutMs: 90000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'How to change the image.' },
@@ -185,27 +214,28 @@ export function apply(ctx, config) {
           image: { url: imageUrlInput, type: 'image_url' },
         },
       })
-      const remote = imageUrl(await response.json())
-      if (!remote) throw new Error('The image edit API returned no URL')
-      const url = await download(store, remote, 'jpg', exec.signal)
+      const remote = imageUrls(await response.json())
+      if (remote.length === 0) throw new Error('The image edit API returned no URL')
+      const url = await download(store, remote[0], 'jpg', exec.signal)
       return result('image', url, `Edited image: ![image](${url})`)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'create_video',
-    description: 'Create a short video from a text prompt. Pass image_url to animate that still; omit it to create the video from text alone. Duration is 6, 10, or 15 seconds. Show the returned URL to the user.',
+    description: 'Create a video with POST /v1/videos/generations, then poll GET /v1/videos/{request_id} until status is done. model is grok-imagine-video-1.5. duration is an integer from 1 to 15 seconds and defaults to 6. Omit image_url for text-to-video. The REST body does not take resolution. Show the returned URL to the user.',
     timeoutMs: 240000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'What the video should show and how the camera moves.' },
       image_url: { type: 'string', description: 'Optional public https URL of a still image to animate.' },
-      duration: { type: 'number', description: 'Length in seconds: 6, 10, or 15. Defaults to 6.' },
+      duration: { type: 'number', description: 'Length in seconds, an integer from 1 to 15. Defaults to 6.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
       const prompt = args.prompt.trim()
       if (!prompt) throw new Error('prompt is empty')
-      const duration = [6, 10, 15].includes(args.duration) ? args.duration : 6
+      const duration = args.duration === undefined ? 6 : args.duration
+      if (!Number.isInteger(duration) || duration < 1 || duration > 15) throw new Error('duration must be an integer from 1 to 15')
       const image = typeof args.image_url === 'string' && args.image_url.trim() ? args.image_url.trim() : undefined
       if (image !== undefined && !/^https:\/\//.test(image)) throw new Error('image_url must be an https URL')
       const started = await xai('/v1/videos/generations', {
