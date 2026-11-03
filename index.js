@@ -78,6 +78,83 @@ async function download(store, url, fallbackExtension, signal) {
   return save(store, Buffer.from(await response.arrayBuffer()), extension)
 }
 
+const TLPRO_IMAGE_MODELS = ['cx/gpt-image-2.5', 'gemini-3.1-flash-image']
+
+function tlproKey() {
+  const key = process.env.TLPRO_API_KEY
+  if (!key) throw new Error('TLPRO_API_KEY is not set')
+  return key
+}
+
+async function tlpro(path, { method = 'POST', body, signal } = {}) {
+  const response = await fetch(`https://hoantienmuasam.net/llmtlpro${path}`, {
+    method,
+    signal,
+    headers: {
+      authorization: `Bearer ${tlproKey()}`,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 400)
+    throw new Error(`TLPro ${path} failed (${response.status}): ${detail}`)
+  }
+  return response
+}
+
+const TLPRO_SIZES = ['auto', '1024x1024', '1536x1024', '1024x1536']
+const TLPRO_QUALITIES = ['auto', 'low', 'medium', 'high']
+
+function tlproSize(aspect) {
+  return {
+    '1:1': '1024x1024',
+    '16:9': '1536x1024',
+    '9:16': '1024x1536',
+    '4:3': '1536x1024',
+    '3:4': '1024x1536',
+    '3:2': '1536x1024',
+    '2:3': '1024x1536',
+    '21:9': '1536x1024',
+  }[aspect]
+}
+
+function tlproImageFields(aspectRatio, size, quality) {
+  const chosen = size === 'auto' ? undefined : (size ?? tlproSize(aspectRatio))
+  return {
+    ...(chosen === undefined ? {} : { size: chosen }),
+    ...(quality === undefined || quality === 'auto' ? {} : { quality }),
+  }
+}
+
+async function tlproEditImage(model, imageUrl, signal) {
+  if (model === 'gemini-3.1-flash-image') return { url: imageUrl, type: 'image_url' }
+  const response = await fetch(imageUrl, { signal })
+  if (!response.ok) throw new Error(`Could not read the source image (${response.status})`)
+  return Buffer.from(await response.arrayBuffer()).toString('base64')
+}
+
+function imageExtension(bytes) {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'png'
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'jpg'
+  if (bytes.slice(0, 4).toString() === 'RIFF') return 'webp'
+  return 'png'
+}
+
+async function storeImages(store, payload, signal) {
+  const rows = Array.isArray(payload?.data) ? payload.data : []
+  const urls = []
+  for (const row of rows) {
+    if (typeof row?.url === 'string' && row.url) urls.push(await download(store, row.url, 'jpg', signal))
+    else if (typeof row?.b64_json === 'string' && row.b64_json) {
+      const bytes = Buffer.from(row.b64_json, 'base64')
+      urls.push(await save(store, bytes, imageExtension(bytes)))
+    }
+  }
+  if (urls.length === 0 && typeof payload?.url === 'string') urls.push(await download(store, payload.url, 'jpg', signal))
+  return urls
+}
+
 function pick(value, allowed, fallback) {
   if (value === undefined || value === '') return fallback
   const found = allowed.find((item) => item.toLowerCase() === String(value).toLowerCase())
@@ -285,13 +362,16 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'create_image',
-    description: 'Create images with POST /v1/images/generations. model is grok-imagine-image-2.0. n is 1 to 10 and defaults to 1. aspect_ratio defaults to auto. resolution is 1k, 1.5k, or 2k and defaults to 1k. Show every returned URL as a markdown image.',
+    description: 'Create images and show every result as a markdown image. model is grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image. n is 1 to 10 and defaults to 1. Grok uses aspect_ratio (1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, auto; default auto) and resolution (1k, 1.5k, 2k; default 1k). cx/gpt-image-2.5 and gemini-3.1-flash-image use size (1024x1024, 1536x1024 landscape, 1024x1536 portrait, auto) and quality (low, medium, high, auto; default auto). If size is omitted, aspect_ratio is mapped to a size. Pass model explicitly when the user names one.',
     timeoutMs: 180000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'What the image should show.' },
+      model: { type: 'string', description: 'grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image.' },
       n: { type: 'number', description: 'How many images to create, from 1 to 10. Defaults to 1.' },
-      aspect_ratio: { type: 'string', description: '1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, or auto. Defaults to auto.' },
-      resolution: { type: 'string', description: '1k, 1.5k, or 2k. Defaults to 1k.' },
+      size: { type: 'string', description: 'TLPro only: auto, 1024x1024, 1536x1024 (landscape), or 1024x1536 (portrait). Overrides aspect_ratio.' },
+      quality: { type: 'string', description: 'TLPro only: auto (default), low, medium, or high.' },
+      aspect_ratio: { type: 'string', description: 'Grok ratio, or the TLPro size to use when size is omitted. 1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, or auto.' },
+      resolution: { type: 'string', description: 'Grok only: 1k, 1.5k, or 2k. Defaults to 1k.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
@@ -299,13 +379,26 @@ export function apply(ctx, config) {
       if (!prompt) throw new Error('prompt is empty')
       const n = args.n === undefined ? 1 : args.n
       if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error('n must be an integer from 1 to 10')
+      const model = pick(args.model, [IMAGE_MODEL, ...TLPRO_IMAGE_MODELS], IMAGE_MODEL)
       const aspectRatio = pick(args.aspect_ratio, IMAGE_ASPECT_RATIOS, undefined)
       const resolution = pick(args.resolution, IMAGE_RESOLUTIONS, undefined)
+      const size = pick(args.size, TLPRO_SIZES, undefined)
+      const quality = pick(args.quality, TLPRO_QUALITIES, undefined)
+      if (TLPRO_IMAGE_MODELS.includes(model)) {
+        const response = await tlpro('/v1/images/generations', {
+          method: 'POST',
+          signal: exec.signal,
+          body: { model, prompt, n, ...tlproImageFields(aspectRatio, size, quality) },
+        })
+        const urls = await storeImages(store, await response.json(), exec.signal)
+        if (urls.length === 0) throw new Error('The image API returned no image')
+        return result('image', urls[0], urls.map((url) => `![image](${url})`).join('\n'))
+      }
       const response = await xai('/v1/images/generations', {
         method: 'POST',
         signal: exec.signal,
         body: {
-          model: IMAGE_MODEL,
+          model,
           prompt,
           n,
           response_format: 'url',
@@ -323,13 +416,17 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'edit_image',
-    description: 'Edit one image with POST /v1/images/edits. model is grok-imagine-image-2.0. The image field is { url, type: "image_url" }. aspect_ratio includes 9:16. resolution is 1k, 1.5k, or 2k. Show the returned URL as a markdown image.',
+    description: 'Edit one existing image and show the result as a markdown image. model is grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image. image_url must be a public https URL. Grok sends { url, type: "image_url" } and accepts aspect_ratio (same list as create_image, including 9:16; omit to keep the source ratio) and resolution (1k, 1.5k, 2k; default 1k). cx/gpt-image-2.5 and gemini-3.1-flash-image accept the same size and quality values as create_image: size auto, 1024x1024, 1536x1024, or 1024x1536; quality auto, low, medium, or high. gpt-image is sent the source as base64. gemini is sent { url, type: "image_url" }. n is 1 to 10 for those two models and defaults to 1.',
     timeoutMs: 180000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'How to change the image.' },
-      image_url: { type: 'string', required: true, description: 'Public URL of the image to edit.' },
-      aspect_ratio: { type: 'string', description: 'Same ratios as create_image, including 9:16. Omit to keep the source ratio.' },
-      resolution: { type: 'string', description: '1k, 1.5k, or 2k. Defaults to 1k.' },
+      image_url: { type: 'string', required: true, description: 'Public https URL of the image to edit.' },
+      model: { type: 'string', description: 'grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image.' },
+      n: { type: 'number', description: 'TLPro only: how many edited images, from 1 to 10. Defaults to 1.' },
+      size: { type: 'string', description: 'TLPro only: auto, 1024x1024, 1536x1024 (landscape), or 1024x1536 (portrait).' },
+      quality: { type: 'string', description: 'TLPro only: auto (default), low, medium, or high.' },
+      aspect_ratio: { type: 'string', description: 'Grok ratio, or the TLPro size when size is omitted. Same values as create_image. Omit to keep the source ratio.' },
+      resolution: { type: 'string', description: 'Grok only: 1k, 1.5k, or 2k. Defaults to 1k.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
@@ -337,13 +434,29 @@ export function apply(ctx, config) {
       const imageUrlInput = args.image_url.trim()
       if (!prompt) throw new Error('prompt is empty')
       if (!/^https:\/\//.test(imageUrlInput)) throw new Error('image_url must be an https URL')
+      const model = pick(args.model, [IMAGE_MODEL, ...TLPRO_IMAGE_MODELS], IMAGE_MODEL)
+      const n = args.n === undefined ? 1 : args.n
+      if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error('n must be an integer from 1 to 10')
       const resolution = pick(args.resolution, IMAGE_RESOLUTIONS, undefined)
       const aspectRatio = pick(args.aspect_ratio, IMAGE_ASPECT_RATIOS, undefined)
+      const size = pick(args.size, TLPRO_SIZES, undefined)
+      const quality = pick(args.quality, TLPRO_QUALITIES, undefined)
+      if (TLPRO_IMAGE_MODELS.includes(model)) {
+        const image = await tlproEditImage(model, imageUrlInput, exec.signal)
+        const response = await tlpro('/v1/images/edits', {
+          method: 'POST',
+          signal: exec.signal,
+          body: { model, prompt, n, image, ...tlproImageFields(aspectRatio, size, quality) },
+        })
+        const urls = await storeImages(store, await response.json(), exec.signal)
+        if (urls.length === 0) throw new Error('The image edit API returned no image')
+        return result('image', urls[0], urls.map((url) => `Edited image: ![image](${url})`).join('\n'))
+      }
       const response = await xai('/v1/images/edits', {
         method: 'POST',
         signal: exec.signal,
         body: {
-          model: IMAGE_MODEL,
+          model,
           prompt,
           image: { url: imageUrlInput, type: 'image_url' },
           ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
