@@ -105,6 +105,8 @@ async function tlpro(path, { method = 'POST', body, signal } = {}) {
 
 const TLPRO_SIZES = ['auto', '1024x1024', '1536x1024', '1024x1536']
 const TLPRO_QUALITIES = ['auto', 'low', 'medium', 'high']
+const GEMINI_MODEL = 'gemini-3.1-flash-image'
+const GEMINI_RESOLUTIONS = ['512', '1K', '2K', '4K']
 
 function tlproSize(aspect) {
   return {
@@ -119,7 +121,29 @@ function tlproSize(aspect) {
   }[aspect]
 }
 
-function tlproImageFields(aspectRatio, size, quality) {
+function geminiResolution(value) {
+  if (value === undefined || value === '') return undefined
+  const alias = { '512': '512', '0.5k': '512', '1k': '1K', '2k': '2K', '4k': '4K' }
+  const mapped = alias[String(value).trim().toLowerCase()] ?? String(value).trim()
+  return pick(mapped, GEMINI_RESOLUTIONS)
+}
+
+function tlproImageFields(model, aspectRatio, size, quality, resolution) {
+  if (model === GEMINI_MODEL) {
+    const imageSize = geminiResolution(resolution)
+    const ratio = aspectRatio && aspectRatio !== 'auto' ? aspectRatio : undefined
+    return {
+      ...(ratio === undefined ? {} : { aspect_ratio: ratio }),
+      ...(imageSize === undefined ? {} : {
+        resolution: imageSize,
+        image_size: imageSize,
+        generationConfig: {
+          responseModalities: ['TEXT', 'IMAGE'],
+          imageConfig: { ...(ratio === undefined ? {} : { aspectRatio: ratio }), imageSize },
+        },
+      }),
+    }
+  }
   const chosen = size === 'auto' ? undefined : (size ?? tlproSize(aspectRatio))
   return {
     ...(chosen === undefined ? {} : { size: chosen }),
@@ -362,16 +386,16 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'create_image',
-    description: 'Create images and show every result as a markdown image. model is grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image. n is 1 to 10 and defaults to 1. Grok uses aspect_ratio (1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, auto; default auto) and resolution (1k, 1.5k, 2k; default 1k). cx/gpt-image-2.5 and gemini-3.1-flash-image use size (1024x1024, 1536x1024 landscape, 1024x1536 portrait, auto) and quality (low, medium, high, auto; default auto). If size is omitted, aspect_ratio is mapped to a size. Pass model explicitly when the user names one.',
+    description: 'Create images and show every result as a markdown image. model is grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image. n is 1 to 10 and defaults to 1. Grok uses aspect_ratio (1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, auto; default auto) and resolution (1k, 1.5k, 2k; default 1k). cx/gpt-image-2.5 uses size (1024x1024, 1536x1024 landscape, 1024x1536 portrait, auto) and quality (low, medium, high, auto; default auto). gemini-3.1-flash-image uses resolution 512, 1K, 2K, or 4K (default 1K when omitted) and aspect_ratio. If size is omitted for gpt-image, aspect_ratio is mapped to a size. Pass model explicitly when the user names one.',
     timeoutMs: 180000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'What the image should show.' },
       model: { type: 'string', description: 'grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image.' },
       n: { type: 'number', description: 'How many images to create, from 1 to 10. Defaults to 1.' },
       size: { type: 'string', description: 'TLPro only: auto, 1024x1024, 1536x1024 (landscape), or 1024x1536 (portrait). Overrides aspect_ratio.' },
-      quality: { type: 'string', description: 'TLPro only: auto (default), low, medium, or high.' },
+      quality: { type: 'string', description: 'cx/gpt-image-2.5 only: auto (default), low, medium, or high. Not used by Gemini.' },
       aspect_ratio: { type: 'string', description: 'Grok ratio, or the TLPro size to use when size is omitted. 1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, or auto.' },
-      resolution: { type: 'string', description: 'Grok only: 1k, 1.5k, or 2k. Defaults to 1k.' },
+      resolution: { type: 'string', description: 'Grok: 1k, 1.5k, or 2k. Gemini: 512, 1K, 2K, or 4K. Not used by cx/gpt-image-2.5.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
@@ -388,7 +412,7 @@ export function apply(ctx, config) {
         const response = await tlpro('/v1/images/generations', {
           method: 'POST',
           signal: exec.signal,
-          body: { model, prompt, n, ...tlproImageFields(aspectRatio, size, quality) },
+          body: { model, prompt, n, ...tlproImageFields(model, aspectRatio, size, quality, resolution) },
         })
         const urls = await storeImages(store, await response.json(), exec.signal)
         if (urls.length === 0) throw new Error('The image API returned no image')
@@ -416,7 +440,7 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'edit_image',
-    description: 'Edit one existing image and show the result as a markdown image. model is grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image. image_url must be a public https URL. Grok sends { url, type: "image_url" } and accepts aspect_ratio (same list as create_image, including 9:16; omit to keep the source ratio) and resolution (1k, 1.5k, 2k; default 1k). cx/gpt-image-2.5 and gemini-3.1-flash-image accept the same size and quality values as create_image: size auto, 1024x1024, 1536x1024, or 1024x1536; quality auto, low, medium, or high. gpt-image is sent the source as base64. gemini is sent { url, type: "image_url" }. n is 1 to 10 for those two models and defaults to 1.',
+    description: 'Edit one existing image and show the result as a markdown image. model is grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image. image_url must be a public https URL. Grok sends { url, type: "image_url" } and accepts aspect_ratio (same list as create_image, including 9:16; omit to keep the source ratio) and resolution (1k, 1.5k, 2k; default 1k). cx/gpt-image-2.5 accepts the same size and quality values as create_image. gemini-3.1-flash-image accepts resolution 512, 1K, 2K, or 4K and the same aspect_ratio values. gpt-image is sent the source as base64. gemini is sent { url, type: "image_url" }. n is 1 to 10 for those two models and defaults to 1.',
     timeoutMs: 180000,
     parameters: {
       prompt: { type: 'string', required: true, description: 'How to change the image.' },
@@ -424,9 +448,9 @@ export function apply(ctx, config) {
       model: { type: 'string', description: 'grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image.' },
       n: { type: 'number', description: 'TLPro only: how many edited images, from 1 to 10. Defaults to 1.' },
       size: { type: 'string', description: 'TLPro only: auto, 1024x1024, 1536x1024 (landscape), or 1024x1536 (portrait).' },
-      quality: { type: 'string', description: 'TLPro only: auto (default), low, medium, or high.' },
+      quality: { type: 'string', description: 'cx/gpt-image-2.5 only: auto (default), low, medium, or high. Not used by Gemini.' },
       aspect_ratio: { type: 'string', description: 'Grok ratio, or the TLPro size when size is omitted. Same values as create_image. Omit to keep the source ratio.' },
-      resolution: { type: 'string', description: 'Grok only: 1k, 1.5k, or 2k. Defaults to 1k.' },
+      resolution: { type: 'string', description: 'Grok: 1k, 1.5k, or 2k. Gemini: 512, 1K, 2K, or 4K. Not used by cx/gpt-image-2.5.' },
     },
     output: { schema: resultSchema, render },
     async execute(args, exec) {
@@ -446,7 +470,7 @@ export function apply(ctx, config) {
         const response = await tlpro('/v1/images/edits', {
           method: 'POST',
           signal: exec.signal,
-          body: { model, prompt, n, image, ...tlproImageFields(aspectRatio, size, quality) },
+          body: { model, prompt, n, image, ...tlproImageFields(model, aspectRatio, size, quality, resolution) },
         })
         const urls = await storeImages(store, await response.json(), exec.signal)
         if (urls.length === 0) throw new Error('The image edit API returned no image')

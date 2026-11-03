@@ -28,16 +28,17 @@ Model mặc định là Grok: `POST https://api.x.ai/v1/images/generations`.
 | `prompt` | `prompt` | Bắt buộc. |
 | `n` | `n` | Số ảnh, từ 1 đến 10. Mặc định 1. |
 | `aspect_ratio` | `aspect_ratio` | Grok. Không bắt buộc. `1:1`, `3:4`, `4:3`, `9:16`, `16:9`, `2:3`, `3:2`, `9:19.5`, `19.5:9`, `9:20`, `20:9`, `1:2`, `2:1`, `21:9`, `5:2`, `auto`. Bỏ trống thì API tự chọn. |
-| `resolution` | `resolution` | Chỉ Grok. Không bắt buộc. `1k`, `1.5k`, `2k`. Bỏ trống thì API dùng `1k`. |
+| `resolution` | `resolution` | Grok: `1k`, `1.5k`, `2k`. Gemini: `512`, `1K`, `2K`, `4K`. Không dùng cho `cx/gpt-image-2.5`. |
 | — | `response_format` | `url`, chỉ khi gọi Grok. |
 
 Hai model TLPro gọi `POST https://hoantienmuasam.net/llmtlpro/v1/images/generations` với `TLPRO_API_KEY`. Ảnh trả về `b64_json` được lưu thành file.
 
 | Tham số tool | Trường API | Giá trị |
 |---|---|---|
-| `size` | `size` | `auto`, `1024x1024`, `1536x1024` (ngang), `1024x1536` (dọc). `auto` hoặc bỏ trống thì không gửi `size`. |
-| `quality` | `quality` | `auto`, `low`, `medium`, `high`. `auto` hoặc bỏ trống thì không gửi `quality`. |
-| `aspect_ratio` | `size` | Chỉ khi không truyền `size`. `1:1` → `1024x1024`, `16:9` / `4:3` / `3:2` / `21:9` → `1536x1024`, `9:16` / `3:4` / `2:3` → `1024x1536`. |
+| `size` | `size` | Chỉ `cx/gpt-image-2.5`. `auto`, `1024x1024`, `1536x1024` (ngang), `1024x1536` (dọc). |
+| `quality` | `quality` | Chỉ `cx/gpt-image-2.5`. `auto`, `low`, `medium`, `high`. |
+| `resolution` | `resolution`, `image_size` | Chỉ Gemini. `512`, `1K`, `2K`, `4K`. Bỏ trống thì để `1K`. |
+| `aspect_ratio` | `aspect_ratio` | Gemini gửi nguyên tỉ lệ. `cx/gpt-image-2.5` map sang `size` khi không truyền `size`: `1:1` → `1024x1024`, `16:9` / `4:3` / `3:2` / `21:9` → `1536x1024`, `9:16` / `3:4` / `2:3` → `1024x1536`. |
 
 ### `edit_image`
 
@@ -48,11 +49,11 @@ Model mặc định là Grok: `POST https://api.x.ai/v1/images/edits`.
 | `model` | `model` | Mặc định `grok-imagine-image-2.0`. Có thể chọn `cx/gpt-image-2.5` hoặc `gemini-3.1-flash-image`. |
 | `prompt` | `prompt` | Bắt buộc. Cách sửa ảnh. |
 | `image_url` | `image.url` | URL `https` của ảnh. Với Grok, `image.type` luôn là `image_url`. |
-| `resolution` | `resolution` | Chỉ Grok. Không bắt buộc. `1k`, `1.5k`, `2k`. Bỏ trống thì API dùng `1k`. |
+| `resolution` | `resolution` | Grok: `1k`, `1.5k`, `2k`. Gemini: `512`, `1K`, `2K`, `4K`. Không dùng cho `cx/gpt-image-2.5`. |
 | `aspect_ratio` | `aspect_ratio` | Không bắt buộc. Cùng danh sách với `create_image`, gồm `9:16`. Bỏ trống thì giữ tỉ lệ ảnh gốc. |
 | `n` | `n` | Chỉ TLPro. Từ 1 đến 10. Mặc định 1. |
-| `size` | `size` | Chỉ TLPro. Cùng giá trị với `create_image`. |
-| `quality` | `quality` | Chỉ TLPro. `auto`, `low`, `medium`, `high`. |
+| `size` | `size` | Chỉ `cx/gpt-image-2.5`. Cùng giá trị với `create_image`. |
+| `quality` | `quality` | Chỉ `cx/gpt-image-2.5`. `auto`, `low`, `medium`, `high`. |
 
 Hai model TLPro gọi `POST https://hoantienmuasam.net/llmtlpro/v1/images/edits`. `cx/gpt-image-2.5` nhận ảnh nguồn dạng base64. `gemini-3.1-flash-image` nhận `{ url, type: "image_url" }`.
 
