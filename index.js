@@ -1,10 +1,10 @@
 /**
- * Session tools that speak text, create or edit an image, and make a video
- * from text or from a still. Files are saved locally and served at /media.
+ * Session tools for speech and GPT/Gemini images.
+ * Existing media remains available at /media.
  */
 import { randomBytes } from 'node:crypto'
 import { mkdirSync, createReadStream, statSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
@@ -26,15 +26,11 @@ const LANGUAGES = [
   'auto', 'en', 'vi', 'ar-EG', 'ar-SA', 'ar-AE', 'bn', 'zh', 'fr', 'de',
   'hi', 'id', 'it', 'ja', 'ko', 'pt-BR', 'pt-PT', 'ru', 'es-MX', 'es-ES', 'tr',
 ]
-const IMAGE_MODEL = 'grok-imagine-image-2.0'
-const VIDEO_MODEL = 'grok-imagine-video-1.5'
+const IMAGE_MODEL = 'cx/gpt-image-2.5'
 const IMAGE_ASPECT_RATIOS = [
   '1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2',
   '9:19.5', '19.5:9', '9:20', '20:9', '1:2', '2:1', '21:9', '5:2', 'auto',
 ]
-const IMAGE_RESOLUTIONS = ['1k', '1.5k', '2k']
-const VIDEO_ASPECT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9', '5:2']
-const VIDEO_RESOLUTIONS = ['480p', '720p', '1080p']
 const FILE_NAME = /^[a-f0-9]{16}\.(mp3|jpg|jpeg|png|webp|mp4)$/
 
 function apiKey() {
@@ -151,11 +147,60 @@ function tlproImageFields(model, aspectRatio, size, quality, resolution) {
   }
 }
 
-async function tlproEditImage(model, imageUrl, signal) {
-  if (model === 'gemini-3.1-flash-image') return { url: imageUrl, type: 'image_url' }
+/**
+ * Read a source image for an edit request.
+ *
+ * A URL under `/media` names a file in this deployment's own store, and that
+ * route is served behind the panel's auth gate: fetching it over HTTP answers
+ * 401, which is why edits used to fail with "Could not read the source image
+ * (401)". Such a file is read straight from disk instead. Any other host is
+ * fetched normally.
+ * @param imageUrl - the source image URL supplied to the tool.
+ * @param store - the media store (directory plus public URL builder).
+ * @param signal - cancellation for the download path.
+ * @returns the file bytes.
+ */
+async function readSourceImage(imageUrl, store, signal) {
+  const file = basename(new URL(imageUrl).pathname)
+  const parsed = new URL(imageUrl)
+  const isStoreUrl = parsed.origin === new URL(store.url('')).origin && /^\/media\/[^/]+$/.test(parsed.pathname)
+  if (isStoreUrl) {
+    if (!FILE_NAME.test(file)) throw new Error(`Not a stored media file: ${file}`)
+    return readFile(join(store.dir, file))
+  }
   const response = await fetch(imageUrl, { signal })
   if (!response.ok) throw new Error(`Could not read the source image (${response.status})`)
-  return Buffer.from(await response.arrayBuffer()).toString('base64')
+  return Buffer.from(await response.arrayBuffer())
+}
+
+/** MIME type for a stored file, used when inlining it as a data URL. */
+function mimeOf(file) {
+  if (file.endsWith('.png')) return 'image/png'
+  if (file.endsWith('.webp')) return 'image/webp'
+  return 'image/jpeg'
+}
+
+/**
+ * Turn a local store URL into a self-contained data URL.
+ *
+ * Providers fetch an `image_url` themselves, so a gated `/media` link is
+ * unusable to them. Inlining the bytes removes the fetch entirely.
+ * @param imageUrl - any image URL.
+ * @param store - the media store.
+ * @param signal - cancellation for the remote download case.
+ * @returns the original URL for other hosts, or a data URL for stored files.
+ */
+async function inlineSourceImage(imageUrl, store, signal) {
+  const parsed = new URL(imageUrl)
+  if (parsed.origin !== new URL(store.url('')).origin || !/^\/media\/[^/]+$/.test(parsed.pathname)) return imageUrl
+  const bytes = await readSourceImage(imageUrl, store, signal)
+  return `data:${mimeOf(basename(parsed.pathname))};base64,${bytes.toString('base64')}`
+}
+
+async function tlproEditImage(model, imageUrl, store, signal) {
+  if (model === 'gemini-3.1-flash-image') return { url: await inlineSourceImage(imageUrl, store, signal), type: 'image_url' }
+  const bytes = await readSourceImage(imageUrl, store, signal)
+  return bytes.toString('base64')
 }
 
 function imageExtension(bytes) {
@@ -184,13 +229,6 @@ function pick(value, allowed, fallback) {
   const found = allowed.find((item) => item.toLowerCase() === String(value).toLowerCase())
   if (!found) throw new Error(`must be one of: ${allowed.join(', ')}`)
   return found
-}
-
-function imageUrls(payload) {
-  const rows = Array.isArray(payload?.data) ? payload.data : []
-  const urls = rows.map((row) => row?.url).filter((url) => typeof url === 'string' && url)
-  if (urls.length === 0 && typeof payload?.url === 'string') urls.push(payload.url)
-  return urls
 }
 
 function result(kind, url, detail) {
@@ -384,175 +422,50 @@ export function apply(ctx, config) {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'create_image',
-    description: 'Create images and show every result as a markdown image. model is grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image. n is 1 to 10 and defaults to 1. Grok uses aspect_ratio (1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, auto; default auto) and resolution (1k, 1.5k, 2k; default 1k). cx/gpt-image-2.5 uses size (1024x1024, 1536x1024 landscape, 1024x1536 portrait, auto) and quality (low, medium, high, auto; default auto). gemini-3.1-flash-image uses resolution 512, 1K, 2K, or 4K (default 1K when omitted) and aspect_ratio. If size is omitted for gpt-image, aspect_ratio is mapped to a size. Pass model explicitly when the user names one.',
-    timeoutMs: 180000,
-    parameters: {
-      prompt: { type: 'string', required: true, description: 'What the image should show.' },
-      model: { type: 'string', description: 'grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image.' },
-      n: { type: 'number', description: 'How many images to create, from 1 to 10. Defaults to 1.' },
-      size: { type: 'string', description: 'TLPro only: auto, 1024x1024, 1536x1024 (landscape), or 1024x1536 (portrait). Overrides aspect_ratio.' },
-      quality: { type: 'string', description: 'cx/gpt-image-2.5 only: auto (default), low, medium, or high. Not used by Gemini.' },
-      aspect_ratio: { type: 'string', description: 'Grok ratio, or the TLPro size to use when size is omitted. 1:1, 3:4, 4:3, 9:16, 16:9, 2:3, 3:2, 9:19.5, 19.5:9, 9:20, 20:9, 1:2, 2:1, 21:9, 5:2, or auto.' },
-      resolution: { type: 'string', description: 'Grok: 1k, 1.5k, or 2k. Gemini: 512, 1K, 2K, or 4K. Not used by cx/gpt-image-2.5.' },
-    },
-    output: { schema: resultSchema, render },
-    async execute(args, exec) {
-      const prompt = args.prompt.trim()
-      if (!prompt) throw new Error('prompt is empty')
-      const n = args.n === undefined ? 1 : args.n
-      if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error('n must be an integer from 1 to 10')
-      const model = pick(args.model, [IMAGE_MODEL, ...TLPRO_IMAGE_MODELS], IMAGE_MODEL)
-      const aspectRatio = pick(args.aspect_ratio, IMAGE_ASPECT_RATIOS, undefined)
-      const resolution = pick(args.resolution, IMAGE_RESOLUTIONS, undefined)
-      const size = pick(args.size, TLPRO_SIZES, undefined)
-      const quality = pick(args.quality, TLPRO_QUALITIES, undefined)
-      if (TLPRO_IMAGE_MODELS.includes(model)) {
-        const response = await tlpro('/v1/images/generations', {
+  for (const editing of [false, true]) {
+    ctx.tools.register(defineTool({
+      name: editing ? 'edit_image' : 'create_image',
+      description: editing
+        ? 'Edit an image with cx/gpt-image-2.5 (default) or gemini-3.1-flash-image through TLPro. image_url accepts an https source, including this panel media. GPT uses base64; Gemini uses an image URL with local media inlined. Return every image to the user. Use the model explicitly requested by the user.'
+        : 'Create images with cx/gpt-image-2.5 (default) or gemini-3.1-flash-image through TLPro. Return every image to the user. Use the model explicitly requested by the user.',
+      timeoutMs: 180000,
+      parameters: {
+        prompt: { type: 'string', required: true, description: editing ? 'How to change the image.' : 'What the image should show.' },
+        ...(editing ? { image_url: { type: 'string', required: true, description: 'HTTPS source image, including this panel /media/ URLs.' } } : {}),
+        model: { type: 'string', description: 'cx/gpt-image-2.5 (default) or gemini-3.1-flash-image.' },
+        n: { type: 'number', description: 'Number of images, from 1 to 10. Defaults to 1.' },
+        size: { type: 'string', description: 'GPT only: auto, 1024x1024, 1536x1024, or 1024x1536. Overrides aspect_ratio.' },
+        quality: { type: 'string', description: 'GPT only: auto (default), low, medium, or high.' },
+        aspect_ratio: { type: 'string', description: 'Gemini uses this ratio directly. GPT maps 1:1 to square, landscape to 1536x1024, and portrait to 1024x1536 when size is omitted. Omit on edits to preserve source ratio.' },
+        resolution: { type: 'string', description: 'Gemini only: 512, 1K, 2K, or 4K. Default 1K. Not used by GPT.' },
+      },
+      output: { schema: resultSchema, render },
+      async execute(args, exec) {
+        const prompt = args.prompt.trim()
+        if (!prompt) throw new Error('prompt is empty')
+        const model = pick(args.model, TLPRO_IMAGE_MODELS, IMAGE_MODEL)
+        const n = args.n === undefined ? 1 : args.n
+        if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error('n must be an integer from 1 to 10')
+        const aspectRatio = pick(args.aspect_ratio, IMAGE_ASPECT_RATIOS, undefined)
+        const gemini = model === GEMINI_MODEL
+        const resolution = gemini ? geminiResolution(args.resolution) : undefined
+        const size = gemini ? undefined : pick(args.size, TLPRO_SIZES, undefined)
+        const quality = gemini ? undefined : pick(args.quality, TLPRO_QUALITIES, undefined)
+        let image
+        if (editing) {
+          const source = args.image_url.trim()
+          if (!/^https:\/\//.test(source)) throw new Error('image_url must be an https URL')
+          image = await tlproEditImage(model, source, store, exec.signal)
+        }
+        const response = await tlpro(editing ? '/v1/images/edits' : '/v1/images/generations', {
           method: 'POST',
           signal: exec.signal,
-          body: { model, prompt, n, ...tlproImageFields(model, aspectRatio, size, quality, resolution) },
+          body: { model, prompt, n, ...(editing ? { image } : {}), ...tlproImageFields(model, aspectRatio, size, quality, resolution) },
         })
         const urls = await storeImages(store, await response.json(), exec.signal)
         if (urls.length === 0) throw new Error('The image API returned no image')
-        return result('image', urls[0], urls.map((url) => `![image](${url})`).join('\n'))
-      }
-      const response = await xai('/v1/images/generations', {
-        method: 'POST',
-        signal: exec.signal,
-        body: {
-          model,
-          prompt,
-          n,
-          response_format: 'url',
-          ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
-          ...(resolution === undefined ? {} : { resolution }),
-        },
-      })
-      const remote = imageUrls(await response.json())
-      if (remote.length === 0) throw new Error('The image API returned no URL')
-      const urls = []
-      for (const item of remote) urls.push(await download(store, item, 'jpg', exec.signal))
-      return result('image', urls[0], urls.map((url) => `![image](${url})`).join('\n'))
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'edit_image',
-    description: 'Edit one existing image and show the result as a markdown image. model is grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image. image_url must be a public https URL. Grok sends { url, type: "image_url" } and accepts aspect_ratio (same list as create_image, including 9:16; omit to keep the source ratio) and resolution (1k, 1.5k, 2k; default 1k). cx/gpt-image-2.5 accepts the same size and quality values as create_image. gemini-3.1-flash-image accepts resolution 512, 1K, 2K, or 4K and the same aspect_ratio values. gpt-image is sent the source as base64. gemini is sent { url, type: "image_url" }. n is 1 to 10 for those two models and defaults to 1.',
-    timeoutMs: 180000,
-    parameters: {
-      prompt: { type: 'string', required: true, description: 'How to change the image.' },
-      image_url: { type: 'string', required: true, description: 'Public https URL of the image to edit.' },
-      model: { type: 'string', description: 'grok-imagine-image-2.0 (default), cx/gpt-image-2.5, or gemini-3.1-flash-image.' },
-      n: { type: 'number', description: 'TLPro only: how many edited images, from 1 to 10. Defaults to 1.' },
-      size: { type: 'string', description: 'TLPro only: auto, 1024x1024, 1536x1024 (landscape), or 1024x1536 (portrait).' },
-      quality: { type: 'string', description: 'cx/gpt-image-2.5 only: auto (default), low, medium, or high. Not used by Gemini.' },
-      aspect_ratio: { type: 'string', description: 'Grok ratio, or the TLPro size when size is omitted. Same values as create_image. Omit to keep the source ratio.' },
-      resolution: { type: 'string', description: 'Grok: 1k, 1.5k, or 2k. Gemini: 512, 1K, 2K, or 4K. Not used by cx/gpt-image-2.5.' },
-    },
-    output: { schema: resultSchema, render },
-    async execute(args, exec) {
-      const prompt = args.prompt.trim()
-      const imageUrlInput = args.image_url.trim()
-      if (!prompt) throw new Error('prompt is empty')
-      if (!/^https:\/\//.test(imageUrlInput)) throw new Error('image_url must be an https URL')
-      const model = pick(args.model, [IMAGE_MODEL, ...TLPRO_IMAGE_MODELS], IMAGE_MODEL)
-      const n = args.n === undefined ? 1 : args.n
-      if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error('n must be an integer from 1 to 10')
-      const resolution = pick(args.resolution, IMAGE_RESOLUTIONS, undefined)
-      const aspectRatio = pick(args.aspect_ratio, IMAGE_ASPECT_RATIOS, undefined)
-      const size = pick(args.size, TLPRO_SIZES, undefined)
-      const quality = pick(args.quality, TLPRO_QUALITIES, undefined)
-      if (TLPRO_IMAGE_MODELS.includes(model)) {
-        const image = await tlproEditImage(model, imageUrlInput, exec.signal)
-        const response = await tlpro('/v1/images/edits', {
-          method: 'POST',
-          signal: exec.signal,
-          body: { model, prompt, n, image, ...tlproImageFields(model, aspectRatio, size, quality, resolution) },
-        })
-        const urls = await storeImages(store, await response.json(), exec.signal)
-        if (urls.length === 0) throw new Error('The image edit API returned no image')
-        return result('image', urls[0], urls.map((url) => `Edited image: ![image](${url})`).join('\n'))
-      }
-      const response = await xai('/v1/images/edits', {
-        method: 'POST',
-        signal: exec.signal,
-        body: {
-          model,
-          prompt,
-          image: { url: imageUrlInput, type: 'image_url' },
-          ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
-          ...(resolution === undefined ? {} : { resolution }),
-        },
-      })
-      const remote = imageUrls(await response.json())
-      if (remote.length === 0) throw new Error('The image edit API returned no URL')
-      const url = await download(store, remote[0], 'jpg', exec.signal)
-      return result('image', url, `Edited image: ![image](${url})`)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'create_video',
-    description: 'Create a video with POST /v1/videos/generations, then poll GET /v1/videos/{request_id} until status is done. model is grok-imagine-video-1.5. duration is an integer from 1 to 15 seconds and defaults to 6. resolution is 480p, 720p, or 1080p. aspect_ratio includes 9:16 and is sent only for text-to-video. Omit image_url for text-to-video. Show the returned URL to the user.',
-    timeoutMs: 240000,
-    parameters: {
-      prompt: { type: 'string', required: true, description: 'What the video should show and how the camera moves.' },
-      image_url: { type: 'string', description: 'Optional public https URL of a still image to animate. Image-to-video keeps that image ratio.' },
-      duration: { type: 'number', description: 'Length in seconds, an integer from 1 to 15. Defaults to 6.' },
-      aspect_ratio: { type: 'string', description: 'Text-to-video only: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 21:9, or 5:2.' },
-      resolution: { type: 'string', description: '480p, 720p, or 1080p. Defaults to 480p when omitted.' },
-    },
-    output: { schema: resultSchema, render },
-    async execute(args, exec) {
-      const prompt = args.prompt.trim()
-      if (!prompt) throw new Error('prompt is empty')
-      const duration = args.duration === undefined ? 6 : args.duration
-      if (!Number.isInteger(duration) || duration < 1 || duration > 15) throw new Error('duration must be an integer from 1 to 15')
-      const image = typeof args.image_url === 'string' && args.image_url.trim() ? args.image_url.trim() : undefined
-      if (image !== undefined && !/^https:\/\//.test(image)) throw new Error('image_url must be an https URL')
-      const aspectRatio = image === undefined ? pick(args.aspect_ratio, VIDEO_ASPECT_RATIOS, undefined) : undefined
-      const resolution = pick(args.resolution, VIDEO_RESOLUTIONS, undefined)
-      const started = await xai('/v1/videos/generations', {
-        method: 'POST',
-        signal: exec.signal,
-        body: {
-          model: VIDEO_MODEL,
-          prompt,
-          duration,
-          ...(image === undefined ? {} : { image: { url: image } }),
-          ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
-          ...(resolution === undefined ? {} : { resolution }),
-        },
-      })
-      const requestId = (await started.json()).request_id
-      if (typeof requestId !== 'string' || !requestId) throw new Error('The video API returned no request id')
-      const deadline = Date.now() + 210000
-      let remote
-      while (Date.now() < deadline) {
-        await new Promise((resolve, reject) => {
-          const timer = setTimeout(resolve, 5000)
-          exec.signal?.addEventListener('abort', () => {
-            clearTimeout(timer)
-            reject(new Error('Cancelled'))
-          }, { once: true })
-        })
-        const polled = await xai(`/v1/videos/${requestId}`, { signal: exec.signal })
-        const payload = await polled.json()
-        if (payload.status === 'done') {
-          remote = payload.video?.url ?? payload.url
-          break
-        }
-        if (payload.status === 'failed' || payload.status === 'expired') {
-          throw new Error(`Video ${payload.status}`)
-        }
-      }
-      if (!remote) throw new Error('The video was not ready in time')
-      const url = await download(store, remote, 'mp4', exec.signal)
-      const watch = url.replace(/\/media\//, '/media/watch/')
-      return result('video', url, `Video (${duration}s): ${watch}`)
-    },
-  }))
+        return result('image', urls[0], urls.map((url) => '![image](' + url + ')').join('\n'))
+      },
+    }))
+  }
 }

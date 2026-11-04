@@ -1,99 +1,45 @@
-# dsh-media
+# dsh-media 1.3.0
 
-Bộ công cụ DeepSeek Harness. Tạo và sửa ảnh bằng Grok hoặc hai model TLPro, rồi lưu file để mở trên trang.
-
-Cần biến môi trường `XAI_API_KEY` cho Grok. Hai model `cx/gpt-image-2.5` và `gemini-3.1-flash-image` cần `TLPRO_API_KEY`. Không ghi key vào file này.
+Tạo/sửa ảnh mặc định bằng **cx/gpt-image-2.5** qua TLPRO. Có thể chọn
+**gemini-3.1-flash-image**. TTS tiếng Việt và các giọng x.ai vẫn được giữ.
 
 ## Công cụ
 
-Thông số dưới đây là phần thân JSON gửi lên API, không phải thông số giao diện Grok.
+- `create_image`: prompt, model, n (1–10), aspect_ratio; GPT có size/quality,
+  Gemini có resolution 512/1K/2K/4K.
+- `edit_image`: cùng tham số trên, thêm image_url HTTPS. Ảnh /media/ của chính
+  website được đọc từ ổ đĩa và gửi base64/data URL để không vướng đăng nhập.
+- `speak`: text tối đa 60.000 ký tự, voice mặc định eve, language mặc định en;
+  dùng vi cho tiếng Việt.
 
-### `speak`
+GPT nhận size auto/1024x1024/1536x1024/1024x1536; quality auto/low/medium/high.
+Khi không truyền size, tỉ lệ ngang ánh xạ sang 1536x1024, dọc sang 1024x1536,
+vuông sang 1024x1024. Đây là kích thước API GPT hỗ trợ, không phải 9:16 chính xác.
+Gemini nhận nguyên aspect_ratio, resolution mặc định của nhà cung cấp là 1K.
 
-`POST https://api.x.ai/v1/tts` → file `audio/mpeg`.
+Ảnh gọi `POST /llmtlpro/v1/images/generations` hoặc `/images/edits` trên
+hoantienmuasam.net với biến môi trường `TLPRO_API_KEY`.
+TTS gọi `POST https://api.x.ai/v1/tts` với `XAI_API_KEY`.
+Không ghi khóa API vào cấu hình hoặc Git.
 
-| Tham số tool | Trường API | Giá trị |
-|---|---|---|
-| `text` | `text` | Bắt buộc. Tối đa 60 000 ký tự. |
-| `voice` | `voice_id` | Mặc định `eve`. Giọng có sẵn: eve, ara, rex, sal, leo, carina, zagan, helix, orion, luna, iris, altair, zenith, perseus, helios, lux, kepler, rigel, cosmo, celeste, ursa, sirius, lumen, castor, naksh, atlas, aurora, liora. Hoặc `voice_id` tùy chỉnh 8 ký tự. |
-| `language` | `language` | Mặc định `en`. `auto`, `en`, `vi`, `zh`, `ja`, `ko`, `fr`, `de`, `hi`, `id`, `it`, `ru`, `tr`, `bn`, `pt-BR`, `pt-PT`, `es-MX`, `es-ES`, `ar-EG`, `ar-SA`, `ar-AE`. Tiếng Việt là `vi`. |
-
-### `create_image`
-
-Model mặc định là Grok: `POST https://api.x.ai/v1/images/generations`.
-
-| Tham số tool | Trường API | Giá trị |
-|---|---|---|
-| `model` | `model` | Mặc định `grok-imagine-image-2.0`. Có thể chọn `cx/gpt-image-2.5` hoặc `gemini-3.1-flash-image`. |
-| `prompt` | `prompt` | Bắt buộc. |
-| `n` | `n` | Số ảnh, từ 1 đến 10. Mặc định 1. |
-| `aspect_ratio` | `aspect_ratio` | Grok. Không bắt buộc. `1:1`, `3:4`, `4:3`, `9:16`, `16:9`, `2:3`, `3:2`, `9:19.5`, `19.5:9`, `9:20`, `20:9`, `1:2`, `2:1`, `21:9`, `5:2`, `auto`. Bỏ trống thì API tự chọn. |
-| `resolution` | `resolution` | Grok: `1k`, `1.5k`, `2k`. Gemini: `512`, `1K`, `2K`, `4K`. Không dùng cho `cx/gpt-image-2.5`. |
-| — | `response_format` | `url`, chỉ khi gọi Grok. |
-
-Hai model TLPro gọi `POST https://hoantienmuasam.net/llmtlpro/v1/images/generations` với `TLPRO_API_KEY`. Ảnh trả về `b64_json` được lưu thành file.
-
-| Tham số tool | Trường API | Giá trị |
-|---|---|---|
-| `size` | `size` | Chỉ `cx/gpt-image-2.5`. `auto`, `1024x1024`, `1536x1024` (ngang), `1024x1536` (dọc). |
-| `quality` | `quality` | Chỉ `cx/gpt-image-2.5`. `auto`, `low`, `medium`, `high`. |
-| `resolution` | `resolution`, `image_size` | Chỉ Gemini. `512`, `1K`, `2K`, `4K`. Bỏ trống thì để `1K`. |
-| `aspect_ratio` | `aspect_ratio` | Gemini gửi nguyên tỉ lệ. `cx/gpt-image-2.5` map sang `size` khi không truyền `size`: `1:1` → `1024x1024`, `16:9` / `4:3` / `3:2` / `21:9` → `1536x1024`, `9:16` / `3:4` / `2:3` → `1024x1536`. |
-
-### `edit_image`
-
-Model mặc định là Grok: `POST https://api.x.ai/v1/images/edits`.
-
-| Tham số tool | Trường API | Giá trị |
-|---|---|---|
-| `model` | `model` | Mặc định `grok-imagine-image-2.0`. Có thể chọn `cx/gpt-image-2.5` hoặc `gemini-3.1-flash-image`. |
-| `prompt` | `prompt` | Bắt buộc. Cách sửa ảnh. |
-| `image_url` | `image.url` | URL `https` của ảnh. Với Grok, `image.type` luôn là `image_url`. |
-| `resolution` | `resolution` | Grok: `1k`, `1.5k`, `2k`. Gemini: `512`, `1K`, `2K`, `4K`. Không dùng cho `cx/gpt-image-2.5`. |
-| `aspect_ratio` | `aspect_ratio` | Không bắt buộc. Cùng danh sách với `create_image`, gồm `9:16`. Bỏ trống thì giữ tỉ lệ ảnh gốc. |
-| `n` | `n` | Chỉ TLPro. Từ 1 đến 10. Mặc định 1. |
-| `size` | `size` | Chỉ `cx/gpt-image-2.5`. Cùng giá trị với `create_image`. |
-| `quality` | `quality` | Chỉ `cx/gpt-image-2.5`. `auto`, `low`, `medium`, `high`. |
-
-Hai model TLPro gọi `POST https://hoantienmuasam.net/llmtlpro/v1/images/edits`. `cx/gpt-image-2.5` nhận ảnh nguồn dạng base64. `gemini-3.1-flash-image` nhận `{ url, type: "image_url" }`.
-
-### `create_video`
-
-`POST https://api.x.ai/v1/videos/generations`, rồi `GET https://api.x.ai/v1/videos/{request_id}` đến khi `status` là `done`.
-
-| Tham số tool | Trường API | Giá trị |
-|---|---|---|
-| — | `model` | `grok-imagine-video-1.5` |
-| `prompt` | `prompt` | Bắt buộc. |
-| `image_url` | `image.url` | Không bắt buộc. Bỏ trống thì tạo video từ chữ. Có URL thì tạo video từ ảnh đó. |
-| `duration` | `duration` | Số nguyên từ 1 đến 15 giây. Mặc định 6. |
-| `aspect_ratio` | `aspect_ratio` | Chỉ khi tạo từ chữ. `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `21:9`, `5:2`. Video từ ảnh giữ tỉ lệ ảnh gốc. |
-| `resolution` | `resolution` | Không bắt buộc. `480p`, `720p`, `1080p`. Bỏ trống thì API dùng `480p`. |
-
-Khi xong, URL nằm ở `video.url`.
+Tạo/sửa ảnh x.ai và công cụ tạo video x.ai đã được gỡ. Ảnh, video, audio đã lưu
+vẫn xem và tải được. `client.js` hiển thị trình phát và nút tải file; package
+phải khai báo `exports["./client"]` và `dsh.client` để DSH nạp phần giao diện.
 
 ## Cài vào DSH
 
-Thêm `dsh-media` vào `dsh.profile.bundles`, rồi phủ cấu hình trong `cordis.patch.yml` của profile:
+Thêm dsh-media vào `dsh.profile.bundles`, rồi cấu hình profile:
 
 ```yaml
 - id: dsh-media
   config:
-    publicOrigin: https://example.com
-    mediaDir: /var/lib/dsh/media
+    publicOrigin: https://dsh.hoantienmuasam.net
+    mediaDir: /data/.dsh/state/superagent/media
 ```
 
-`publicOrigin` là địa chỉ trang public. `mediaDir` là thư mục lưu file. Trang phục vụ file tại `/media/<tệp>`.
+File phục vụ tại /media/<tệp>, thêm ?download=1 để tải. Có HEAD và Range
+(206); video cũ còn trang /media/watch/<tệp>.
 
-Trên máy đang chạy:
+## Kiểm thử
 
-```yaml
-- id: dsh-media
-  config:
-    publicOrigin: https://agent.hoantienmuasam.net
-    mediaDir: /dsh/home/state/superagent/media
-```
-
-## Trên trang chat
-
-`client.js` đổi link `/media/...mp3` thành thanh nghe, link video thành khung xem, và thêm icon tải ở hàng nút dưới tin nhắn. File video và audio vẫn tải được bằng `?download=1`.
+`npm test` chạy các kiểm thử API giả lập, không tạo media có tính phí.
